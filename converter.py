@@ -4,28 +4,30 @@ Excel 明细表（数据表）-> 汇总表（表一格式）转换逻辑
 核心规则：
 - 数据表第1行空，第2行标题 → 读取用 header=1
 - 每个「序号」恰好一行（51序号 = 51行），无需分组聚合
-- 「单位种类.1」= 报关后单位（件/个/套/台/吨/米）→ 输出「单位种类」
-- 「报关单位」= 法定第一单位（台/个/套）→ 输出「单位」
-- 配件行（如序号4球阀）的 件数/体积/毛重 本就为空 → 输出也留空
+- 「单位种类.1」= 报关后单位（件/个/套/台/吨）→ 输出「单位种类」
+- 「报关单位」= 法定第一单位 → 输出「单位」
 - 单价（美金）= 总价（美金） / 总数量（自动计算）
 - 退税金额 = 内贸金额 / 1.13 × 退税率（自动计算）
 - 保费 = 总价（美金） × 保险费率 0.01595%（自动计算）
-- 运费：数据表中无此列，由人工填写（代码保留数据表值，无则留空）
+- 运费 = 公式 MAX(ROUND(SUM(J行),2), SUM(K行)/1000)*15
 
-输出：第1行空，第2行标题，第3行起数据，按序号升序，共 27 列
+输出格式：
+- 第1行空，第2行标题，第3行起数据，按序号升序，共 27 列
+- 空单元格合并（向上合并同类）
+- 所有单元格：水平居中 + 垂直居中 + 自动换行
 """
 
 import re
 from collections import OrderedDict
 import pandas as pd
+from openpyxl.styles import Alignment, Border, Side, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 
 # =========================================================
 # 可配置参数
 # =========================================================
-INSURANCE_RATE = 0.0001595   # 保险费率：保费 = 美金总价 × 此比例
-# 运费：数据表中无此列，由人工填写；如需自动计算取消下面注释并调整费率
-# FREIGHT_RATE = 0.03  # 元/kg，运费 = 总毛重 × FREIGHT_RATE
+INSURANCE_RATE = 0.0001595   # 保险费率
 
 
 # =========================================================
@@ -61,33 +63,53 @@ OUTPUT_COLUMNS = [
     "供应商",
 ]
 
+# 需要合并的列（空单元格向上合并到最近的非空单元格）
+# 这些列的值在同一序号组内可能跨行相同，合并后更整洁
+MERGE_COLUMNS = [
+    "提单号",
+    "船次",
+    "外贸合同号",
+    "内贸合同号",
+    "品名",
+    "英文品名",
+    "申报要素",
+    "供应商",
+]
+
+# 数值列（右对齐数值，但整体仍居中）
+NUMERIC_COLUMNS = {
+    "序号", "打包后件数", "体积", "总毛重", "总净重", "总数量",
+    "单价（美金）", "总 价（美金）", "换汇成本", "运费", "保费",
+    "出口/海关编码", "内贸金额", "退税率", "退税金额",
+}
+
 # 输出列 -> 数据表真实列的模糊候选
 COLUMN_MAP = {
     "提单号":       ["提单号"],
-    "船次":         [],                        # 固定值 989船
+    "船次":         [],
     "序号":         ["序号"],
     "外贸合同号":    ["外贸合同号"],
     "内贸合同号":    ["内贸合同号"],
     "品名":         ["品名"],
     "英文品名":      ["英文品名"],
     "打包后件数":    ["打包后件数", "打包后 件数", "打包后\n件数"],
-    "单位种类":      ["单位种类.1", "单位 种类.1"],       # 报关后单位
+    "单位种类":      ["单位种类.1", "单位 种类.1"],
     "体积":         ["体积"],
     "总毛重":       ["总毛重"],
     "总净重":       ["总净重"],
     "总数量":       ["总数量"],
-    "单位":         ["报关单位"],                  # 法定第一单位
+    "单位":         ["报关单位"],
     "法定单位":      ["法定单位"],
-    "单价（美金）":   [],                           # 自动计算
+    "单价（美金）":   [],
     "总 价（美金）":  ["总价（美金）", "总 价（美金）", "总价"],
     "换汇成本":      ["换汇成本"],
-    "运费":         ["运费"],                      # 无则留空
-    "保费":         ["保费"],                      # 无则按保险率算
+    "运费":         ["运费"],
+    "保费":         ["保费"],
     "报关单号":      ["报关单号"],
     "出口/海关编码":  ["出口/海关编码", "海关编码"],
     "内贸金额":      ["内贸金额"],
     "退税率":       ["退税率"],
-    "退税金额":      ["退税金额"],                  # 自动计算
+    "退税金额":      ["退税金额"],
     "申报要素":      ["申报要素"],
     "供应商":       ["供应商"],
 }
@@ -131,7 +153,6 @@ def clean_col_name(c):
 
 
 def find_real_column(cleaned_map, candidates):
-    """cleaned_map: {清洗后列名: 原始列名}"""
     if not candidates:
         return None
     for cand in candidates:
@@ -156,7 +177,6 @@ def find_real_column(cleaned_map, candidates):
 # 主转换
 # =========================================================
 def convert_table(df: pd.DataFrame) -> pd.DataFrame:
-    # 建立清洗映射
     cleaned_map = {}
     for orig in df.columns:
         nc = clean_col_name(orig)
@@ -166,7 +186,6 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [cleaned_map.get(clean_col_name(c), c) for c in df.columns]
 
-    # 序号列
     seq_real = find_real_column(cleaned_map, ["序号"])
     if seq_real is None:
         raise ValueError(f"未找到「序号」列。实际列名：{list(cleaned_map.values())}")
@@ -177,7 +196,6 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("序号列没有有效数值。")
     df["__seq"] = df["__seq"].astype(int)
 
-    # 预解析列映射
     real_map = {}
     for out_col, candidates in COLUMN_MAP.items():
         real = find_real_column(cleaned_map, candidates)
@@ -195,7 +213,6 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
                 return default
             return v
 
-        # 基础数值
         total_price = safe_float(get_val("总 价（美金）"))
         total_qty = safe_float(get_val("总数量"))
         irm = safe_float(get_val("内贸金额"))
@@ -207,10 +224,7 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
         if tax_refund is None and irm is not None and trr is not None:
             tax_refund = round(irm / 1.13 * trr, 6)
 
-        # 运费（数据表无则留空，由人工填写）
-        freight = safe_float(get_val("运费"), default=None)
-
-        # 保费（数据表有则透传，无则按保险率算）
+        # 保费（自动计算）
         premium = safe_float(get_val("保费"))
         if premium is None and total_price:
             premium = round(total_price * INSURANCE_RATE, 8)
@@ -226,7 +240,7 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
         row["内贸合同号"] = get_val("内贸合同号", "") or ""
         row["品名"] = get_val("品名", "") or ""
         row["英文品名"] = get_val("英文品名", "") or ""
-        row["打包后件数"] = safe_int(get_val("打包后件数"), default=None)  # 空则留空
+        row["打包后件数"] = safe_int(get_val("打包后件数"), default=None)
         row["单位种类"] = get_val("单位种类", "") or ""
         row["体积"] = safe_float(get_val("体积"), default=None)
         row["总毛重"] = safe_float(get_val("总毛重"), default=None)
@@ -237,7 +251,7 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
         row["单价（美金）"] = unit_price
         row["总 价（美金）"] = total_price
         row["换汇成本"] = safe_float(get_val("换汇成本"), default=None)
-        row["运费"] = freight
+        row["运费"] = None   # 由公式填充
         row["保费"] = premium
         row["报关单号"] = get_val("报关单号", "") or ""
         row["出口/海关编码"] = safe_float(get_val("出口/海关编码"), default=None)
@@ -254,6 +268,7 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
 
 # =========================================================
 # 导出 Excel（第1行空，第2行标题，第3行起数据）
+# 格式：空单元格合并 + 全部居中 + 运费公式
 # =========================================================
 def to_excel_with_layout(result_df, path):
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -261,20 +276,102 @@ def to_excel_with_layout(result_df, path):
             writer, index=False, header=False, startrow=2, sheet_name="汇总表"
         )
         ws = writer.sheets["汇总表"]
-        # 第2行写标题
+
+        # ---- 写标题（第2行）----
         for col_idx, name in enumerate(result_df.columns, start=1):
-            ws.cell(row=2, column=col_idx, value=name)
-        # 第1行留空
-        # 自动列宽
+            cell = ws.cell(row=2, column=col_idx, value=name)
+            cell.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+            cell.font = Font(bold=True, name="Microsoft YaHei", size=10)
+
+        # ---- 写数据 + 居中 ----
+        center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin_border = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
+        )
+
+        for row_idx in range(3, 3 + len(result_df)):
+            excel_row = row_idx  # 实际 Excel 行号
+            for col_idx, col_name in enumerate(result_df.columns, start=1):
+                cell = ws.cell(row=excel_row, column=col_idx)
+                cell.alignment = center_align
+                cell.border = thin_border
+                cell.font = Font(name="Microsoft YaHei", size=10)
+
+                # 运费列（第19列 = "运费"）写公式
+                if col_name == "运费":
+                    # J = 体积(第10列), K = 总毛重(第11列)
+                    formula = (
+                        f"=MAX(ROUND(SUM(J{excel_row}),2),"
+                        f"SUM(K{excel_row})/1000)*15"
+                    )
+                    cell.value = formula
+
+        # ---- 合并空单元格（按列，向上合并连续相同/空值）----
+        # 对 MERGE_COLUMNS 中的列，将相邻的相同值合并
+        col_index_map = {name: idx + 1 for idx, name in enumerate(result_df.columns)}
+
+        for col_name in MERGE_COLUMNS:
+            if col_name not in col_index_map:
+                continue
+            col_idx = col_index_map[col_name]
+            start_row = 3
+            end_row = 2 + len(result_df)
+
+            merge_start = start_row
+            for r in range(start_row, end_row + 1):
+                current_val = ws.cell(row=r, column=col_idx).value
+                next_val = ws.cell(row=r + 1, column=col_idx).value if r < end_row else None
+
+                # 如果当前值和下一个值相同（或都为空），继续扩展合并区间
+                if r == end_row:
+                    if r > merge_start:
+                        ws.merge_cells(
+                            start_row=merge_start, start_column=col_idx,
+                            end_row=r, end_column=col_idx
+                        )
+                elif _is_same_value(current_val, next_val):
+                    continue
+                else:
+                    if r > merge_start:
+                        ws.merge_cells(
+                            start_row=merge_start, start_column=col_idx,
+                            end_row=r, end_column=col_idx
+                        )
+                    merge_start = r + 1
+
+        # ---- 自动列宽 ----
         for col_idx, name in enumerate(result_df.columns, start=1):
-            letter = ws.cell(row=2, column=col_idx).column_letter
+            letter = get_column_letter(col_idx)
             max_len = len(str(name))
-            for row in range(3, min(3 + len(result_df), 500)):
-                val = ws.cell(row=row, column=col_idx).value
+            for row_idx in range(3, min(3 + len(result_df), 500)):
+                val = ws.cell(row=row_idx, column=col_idx).value
                 if val is not None:
-                    max_len = max(max_len, len(str(val)[:30]))
-            ws.column_dimensions[letter].width = min(max_len + 4, 35)
+                    max_len = max(max_len, len(str(val)[:40]))
+            ws.column_dimensions[letter].width = min(max_len + 4, 40)
+
+        # 第1行留空（不写内容）
+        # 设置行高
+        ws.row_dimensions[2].height = 30  # 标题行
+        for row_idx in range(3, 3 + len(result_df)):
+            ws.row_dimensions[row_idx].height = 40  # 数据行（给换行留空间）
+
     return path
+
+
+def _is_same_value(a, b):
+    """判断两个单元格值是否"相同"（都空也算相同，用于合并）"""
+    a_empty = a is None or (isinstance(a, str) and a.strip() == "")
+    b_empty = b is None or (isinstance(b, str) and b.strip() == "")
+    if a_empty and b_empty:
+        return True
+    if a_empty or b_empty:
+        return False
+    return str(a).strip() == str(b).strip()
 
 
 def transform(df):
