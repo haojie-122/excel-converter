@@ -1,6 +1,7 @@
 name: Build Windows EXE
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -29,7 +30,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --onefile --windowed --name ExcelConverter desktop.py
 
-      - name: Create Release
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/ExcelConverter.exe
