@@ -6,7 +6,6 @@ Excel 明细表（数据表）-> 汇总表（表一格式）转换逻辑
 - 每个「序号」恰好一行（51序号 = 51行），无需分组聚合
 - 「单位种类」= 报关后单位
 - 「单位」= 法定第一单位
-- 换汇成本 = (内贸金额 - 退税金额 + 运费 + 保费) / 总价（美金）
 
 27 列布局（A~AA）：
  A提单号 B船次 C序号 D外贸合同号 E内贸合同号 F品名 G英文品名
@@ -21,17 +20,23 @@ Excel 明细表（数据表）-> 汇总表（表一格式）转换逻辑
 - 退税金额   Y = W / 1.13 * X
 
 合并规则：仅「打包后件数/单位种类/体积/总毛重」4 列空格向上合并；船次不合并。
-格式：完全复刻源表 —— 宋体/Arial 字体、居中、细边框、各列数字格式、列宽、行高、
+格式：完全复刻源表 —— 字体、居中、细边框、各列数字格式、列宽、行高、
       冻结首行、自动筛选，末尾追加合计行（SUM）。
+
+修复说明（MergedCell 只读问题）：
+- 所有写入/样式复制前均用 isinstance(cell, MergedCell) 保护
+- 写数据前先解除源表数据区原有合并，再按业务规则重新合并
+- 样式复制只复制属性，不碰 value
 """
 
 import re
 from collections import OrderedDict
 from copy import copy
-import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.cell import MergedCell
 from openpyxl.styles import Alignment, Font, Border, Side
 from openpyxl.utils import get_column_letter
+import pandas as pd
 
 
 # =========================================================
@@ -54,10 +59,10 @@ OUTPUT_COLUMNS = [
     "单位",            # N 14
     "法定单位",         # O 15
     "单价（美金）",      # P 16 公式 =Q/M
-    "总 价（美金）",     # Q 17 公式引用
+    "总 价（美金）",     # Q 17
     "换汇成本",         # R 18
     "运费",            # S 19 公式
-    "保费",            # T 20 公式 =Q*1.1 * 0.000145
+    "保费",            # T 20 公式 =Q*1.1*0.000145
     "报关单号",         # U 21
     "出口/海关编码",     # V 22
     "内贸金额",         # W 23
@@ -199,6 +204,11 @@ def _cell_is_empty(v):
     return v is None or (isinstance(v, str) and v.strip() == "")
 
 
+def _is_writable(cell):
+    """判断单元格是否可写（非 MergedCell 占位符）"""
+    return cell is not None and not isinstance(cell, MergedCell)
+
+
 # =========================================================
 # 主转换
 # =========================================================
@@ -244,12 +254,12 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
         irm = safe_float(get_val("内贸金额"))                # W
         trr = safe_float(get_val("退税率"))                  # X
 
-        # 退税金额：公式 Y = W/1.13*X（有源值则透传，否则留 None 由公式算）
+        # 退税金额
         tax_refund = safe_float(get_val("退税金额"))
         if tax_refund is None and irm is not None and trr is not None:
             tax_refund = round(irm / 1.13 * trr, 6)
 
-        # 换汇成本
+        # 换汇成本 = (内贸金额 - 退税金额 + 运费 + 保费) / 总价（美金）
         cost = safe_float(get_val("换汇成本"))
         if cost is None and total_price and total_price > 0:
             freight_tmp = safe_float(get_val("运费"), 0)
@@ -294,6 +304,71 @@ def convert_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
+# 安全样式复制（不碰 value，避免 MergedCell 只读）
+# =========================================================
+def _safe_copy_style(src_cell, dst_cell):
+    if not _is_writable(dst_cell) or not _is_writable(src_cell):
+        return
+    dst_cell.font = copy(src_cell.font)
+    dst_cell.border = copy(src_cell.border)
+    dst_cell.fill = copy(src_cell.fill)
+    dst_cell.alignment = copy(src_cell.alignment)
+    dst_cell.number_format = src_cell.number_format
+    dst_cell.protection = copy(src_cell.protection)
+
+
+def _set_cell_value(ws, row, col, value):
+    """安全写入单元格值，遇到 MergedCell 则跳过"""
+    cell = ws.cell(row=row, column=col)
+    if not _is_writable(cell):
+        return cell
+    cell.value = value
+    return cell
+
+
+# =========================================================
+# 合并：仅指定列，空格向上合并
+# =========================================================
+def _merge_blank_up(ws, col_idx, start_row, end_row):
+    """
+    把每行的非空值向下「吸收」其下方连续的空格。
+    例：r=3 非空，r=4,5 空 → 合并 (3,col)~(5,col)，锚点为 r=3。
+    注意：只合并锚点单元格下方的连续空格；锚点本身保留值。
+    """
+    r = start_row
+    while r <= end_row:
+        cell = ws.cell(row=r, column=col_idx)
+        if not _is_writable(cell):
+            # 遇到合并区间内的非锚点，跳过（保留现有合并）
+            r += 1
+            continue
+        if not _cell_is_empty(cell.value):
+            # 从 r+1 开始找连续空格
+            merge_end = r
+            while merge_end + 1 <= end_row:
+                nxt = ws.cell(row=merge_end + 1, column=col_idx)
+                if not _is_writable(nxt):
+                    break
+                if not _cell_is_empty(nxt.value):
+                    break
+                merge_end += 1
+            if merge_end > r:
+                # 解除该区间可能已有的合并后重新合并（保证锚点可写）
+                for rng in list(ws.merged_cells.ranges):
+                    if (rng.min_row <= r <= rng.max_row and
+                            rng.min_col == col_idx):
+                        ws.unmerge_cells(str(rng))
+                        break
+                ws.merge_cells(
+                    start_row=r, start_column=col_idx,
+                    end_row=merge_end, end_column=col_idx,
+                )
+            r = merge_end + 1
+        else:
+            r += 1
+
+
+# =========================================================
 # 导出 Excel：完全复刻源表格式
 # =========================================================
 def to_excel_with_layout(result_df, path, template_path=None):
@@ -302,14 +377,15 @@ def to_excel_with_layout(result_df, path, template_path=None):
     保证列宽/字体/数字格式/冻结/筛选/打印设置 100% 一致。
     """
     col_idx_map = {name: idx + 1 for idx, name in enumerate(result_df.columns)}
+    n = len(result_df)
+    data_first = 3      # 第1行空，第2行标题，第3行起数据
+    data_last = 2 + n   # 数据结束行
+    total_row = data_last + 1
 
     def L(name):
         return get_column_letter(col_idx_map[name])
 
-    n = len(result_df)
-    data_first = 3      # 第1行空，第2行标题，第3行起数据
-    data_last = 2 + n   # 数据结束行
-    total_row = data_last + 1   # 合计行
+    last_col = len(result_df.columns)
 
     # ---------- 优先：以源表为模板复制样式 ----------
     if template_path:
@@ -317,7 +393,6 @@ def to_excel_with_layout(result_df, path, template_path=None):
         return path
 
     # ---------- 兜底：手动构造（无模板时） ----------
-    from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
     ws.title = "汇总表"
@@ -330,7 +405,7 @@ def to_excel_with_layout(result_df, path, template_path=None):
     # 标题行（第2行）
     header_font = Font(name="宋体", size=10, bold=True)
     for col_idx, name in enumerate(result_df.columns, start=1):
-        cell = ws.cell(row=2, column=col_idx, value=name)
+        cell = _set_cell_value(ws, 2, col_idx, name)
         cell.font = header_font
         cell.alignment = center_wrap
         cell.border = border
@@ -342,6 +417,8 @@ def to_excel_with_layout(result_df, path, template_path=None):
         for col_name in result_df.columns:
             col_idx = col_idx_map[col_name]
             cell = ws.cell(row=excel_row, column=col_idx)
+            if not _is_writable(cell):
+                continue
             val = row[col_name]
             if val is None or (isinstance(val, str) and val == ""):
                 continue
@@ -353,27 +430,22 @@ def to_excel_with_layout(result_df, path, template_path=None):
 
     # 公式列
     for excel_row in range(data_first, data_last + 1):
-        ws[f"{L('单价（美金）')}{excel_row}"] = (
-            f"={L('总 价（美金）')}{excel_row}/{L('总数量')}{excel_row}"
-        )
-        ws[f"{L('运费')}{excel_row}"] = (
-            f"=MAX(ROUND(SUM({L('体积')}{excel_row}),2),"
-            f"SUM({L('总毛重')}{excel_row})/1000)*15"
-        )
-        ws[f"{L('保费')}{excel_row}"] = (
-            f"={L('总 价（美金）')}{excel_row}*1.1 * 0.000145"
-        )
-        ws[f"{L('退税金额')}{excel_row}"] = (
-            f"={L('内贸金额')}{excel_row}/1.13*{L('退税率')}{excel_row}"
-        )
+        _set_cell_value(ws, excel_row, col_idx_map["单价（美金）"],
+                        f"={L('总 价（美金）')}{excel_row}/{L('总数量')}{excel_row}")
+        _set_cell_value(ws, excel_row, col_idx_map["运费"],
+                        f"=MAX(ROUND(SUM({L('体积')}{excel_row}),2),"
+                        f"SUM({L('总毛重')}{excel_row})/1000)*15")
+        _set_cell_value(ws, excel_row, col_idx_map["保费"],
+                        f"={L('总 价（美金）')}{excel_row}*1.1*0.000145")
+        _set_cell_value(ws, excel_row, col_idx_map["退税金额"],
+                        f"={L('内贸金额')}{excel_row}/1.13*{L('退税率')}{excel_row}")
 
     # 合计行
     total_font = Font(name="Arial", size=10, bold=True)
     for col_name in ["打包后件数", "体积", "总毛重", "总净重", "总数量",
                      "总 价（美金）", "内贸金额", "退税金额"]:
-        cell = ws.cell(row=total_row, column=col_idx_map[col_name])
-        letter = L(col_name)
-        cell.value = f"=SUM({letter}{data_first}:{letter}{data_last})"
+        cell = _set_cell_value(ws, total_row, col_idx_map[col_name],
+                                f"=SUM({L(col_name)}{data_first}:{L(col_name)}{data_last})")
         cell.font = total_font
         cell.alignment = center
         cell.border = border
@@ -382,11 +454,12 @@ def to_excel_with_layout(result_df, path, template_path=None):
 
     # 空格向上合并（仅 4 列）
     for col_name in MERGE_COLUMNS:
-        _merge_consecutive_blanks(ws, col_idx_map[col_name], data_first, data_last)
+        _merge_blank_up(ws, col_idx_map[col_name], data_first, data_last)
 
     # 列宽
     for col_name, width in COL_WIDTHS.items():
-        ws.column_dimensions[L(col_name)].width = width
+        if col_name in col_idx_map:
+            ws.column_dimensions[L(col_name)].width = width
 
     # 行高
     ws.row_dimensions[1].height = 20.1
@@ -396,7 +469,7 @@ def to_excel_with_layout(result_df, path, template_path=None):
 
     # 冻结首行 + 自动筛选
     ws.freeze_panes = "A3"
-    ws.auto_filter.ref = f"B2:AC{total_row}"
+    ws.auto_filter.ref = f"A2:{get_column_letter(last_col)}{total_row}"
 
     wb.save(path)
     return path
@@ -421,126 +494,127 @@ def _write_from_template(result_df, path, template_path, n):
 
     thin = Side(style="thin")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center")
+    center_wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     def L(name):
         return get_column_letter(col_idx_map[name])
 
-    # ---------- 清除原有数据（保留第1行空、第2行标题） ----------
-    # 关键：保留源表 H5:H6、H7:H8 ... 等合并结构，只重写锚点值
+    # ---------- 记录源表合并区锚点（用于样式复制时跳过非锚点） ----------
+    merged_anchor_set = set()
+    for rng in ws.merged_cells.ranges:
+        merged_anchor_set.add((rng.min_row, rng.min_col))
+
+    # ---------- 解除数据区全部已有合并，避免 MergedCell 只读 ----------
+    # 先收集要解除的范围（只处理数据区及合计区，保留标题区以外）
+    to_unmerge = [
+        str(rng) for rng in list(ws.merged_cells.ranges)
+        if rng.min_row >= data_first
+    ]
+    for rng_str in to_unmerge:
+        ws.unmerge_cells(rng_str)
+
+    # ---------- 清除原有数据值（保留第1行空、第2行标题） ----------
     for r in range(data_first, ws.max_row + 1):
         for c in range(1, ws.max_column + 1):
             cell = ws.cell(row=r, column=c)
-            # 跳过合并区间内的非锚点单元格（MergedCell，read-only）
-            if type(cell).__name__ == "MergedCell":
-                continue
-            cell.value = None
+            if _is_writable(cell):
+                cell.value = None
 
     # ---------- 重写标题行（第2行，沿用源表样式） ----------
     for col_idx, name in enumerate(result_df.columns, start=1):
         cell = ws.cell(row=2, column=col_idx)
+        if not _is_writable(cell):
+            continue
         cell.value = name
-        if not cell.font or not cell.font.name:
+        if not (cell.font and cell.font.name):
             cell.font = Font(name="宋体", size=10, bold=True)
-        if not cell.alignment or not cell.alignment.horizontal:
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        if not (cell.alignment and cell.alignment.horizontal):
+            cell.alignment = center_wrap
         cell.border = border
 
-    # ---------- 写数据 ----------
+    # ---------- 写数据（仅锚点单元格可写） ----------
     for row_offset, (_, row) in enumerate(result_df.iterrows()):
         excel_row = data_first + row_offset
         for col_name in result_df.columns:
             col_idx = col_idx_map[col_name]
             cell = ws.cell(row=excel_row, column=col_idx)
-            if type(cell).__name__ == "MergedCell":
-                continue  # 非锚点，跳过
+            if not _is_writable(cell):
+                continue
             val = row[col_name]
             if val is None or (isinstance(val, str) and val == ""):
                 continue
             cell.value = val
 
     # ---------- 空格向上合并（仅 4 列，船次除外） ----------
-    # 必须在套样式【之前】完成：先定型合并结构，再逐单元格复制样式
     for col_name in MERGE_COLUMNS:
-        _merge_consecutive_blanks(ws, col_idx_map[col_name], data_first, data_last)
+        _merge_blank_up(ws, col_idx_map[col_name], data_first, data_last)
+
+    # 合并后重建锚点集合
+    merged_anchor_set = set()
+    for rng in ws.merged_cells.ranges:
+        merged_anchor_set.add((rng.min_row, rng.min_col))
 
     # ---------- 逐单元格套用源表样式（以第3行为模板按列复制） ----------
-    # 合并区间内的非锚点单元格不单独设值，只对其锚点(top-left)套样式
-    merged_anchors = {}
-    for rng in ws.merged_cells.ranges:
-        merged_anchors[(rng.min_row, rng.min_col)] = rng
-
     for col_idx in range(1, last_col + 1):
         template_cell = ws.cell(row=data_first, column=col_idx)
         t_font = copy(template_cell.font)
         t_align = copy(template_cell.alignment)
         t_fmt = template_cell.number_format
+        t_border = copy(template_cell.border)
+        t_fill = copy(template_cell.fill)
         for r in range(data_first, data_last + 1):
             cell = ws.cell(row=r, column=col_idx)
-            rng = merged_anchors.get((r, col_idx))
-            if rng and (r != rng.min_row or col_idx != rng.min_col):
-                continue  # 非锚点，跳过
+            # 合并区间内的非锚点单元格：只保证边框，不写值
+            if isinstance(cell, MergedCell):
+                continue
+            if (r, col_idx) not in merged_anchor_set and _cell_is_empty(cell.value):
+                # 将被合并吸收的空格：给边框即可
+                cell.border = border
+                continue
             cell.font = copy(t_font)
             cell.alignment = copy(t_align)
             cell.number_format = t_fmt
-            cell.border = border
+            cell.border = t_border
+            cell.fill = copy(t_fill)
+            # 长文本列强制换行
+            col_name = result_df.columns[col_idx - 1]
+            if col_name in WRAP_COLUMNS:
+                cell.alignment = center_wrap
 
     # ---------- 公式列（逐行，只写锚点单元格） ----------
     for excel_row in range(data_first, data_last + 1):
         for col_name, formula in [
             ("单价（美金）", f"={L('总 价（美金）')}{excel_row}/{L('总数量')}{excel_row}"),
             ("运费", f"=MAX(ROUND(SUM({L('体积')}{excel_row}),2),SUM({L('总毛重')}{excel_row})/1000)*15"),
-            ("保费", f"={L('总 价（美金）')}{excel_row}*1.1 * 0.000145"),
+            ("保费", f"={L('总 价（美金）')}{excel_row}*1.1*0.000145"),
             ("退税金额", f"={L('内贸金额')}{excel_row}/1.13*{L('退税率')}{excel_row}"),
         ]:
             cell = ws.cell(row=excel_row, column=col_idx_map[col_name])
-            if type(cell).__name__ == "MergedCell":
+            if not _is_writable(cell):
                 continue
             cell.value = formula
 
     # ---------- 合计行 ----------
     total_font = Font(name="Arial", size=10, bold=True)
-    center = Alignment(horizontal="center", vertical="center")
     for col_name in ["打包后件数", "体积", "总毛重", "总净重", "总数量",
                      "总 价（美金）", "内贸金额", "退税金额"]:
-        cell = ws.cell(row=total_row, column=col_idx_map[col_name])
-        letter = L(col_name)
-        cell.value = f"=SUM({letter}{data_first}:{letter}{data_last})"
-        cell.font = total_font
-        cell.alignment = center
-        cell.border = border
-        cell.number_format = NUM_FMT.get(col_name, "General")
-    ws.row_dimensions[total_row] = copy(ws.row_dimensions[data_first])
+        cell = _set_cell_value(ws, total_row, col_idx_map[col_name],
+                                f"=SUM({L(col_name)}{data_first}:{L(col_name)}{data_last})")
+        if cell is not None:
+            cell.font = total_font
+            cell.alignment = center
+            cell.border = border
+            cell.number_format = NUM_FMT.get(col_name, "General")
+    if ws.row_dimensions[total_row] is None:
+        ws.row_dimensions[total_row] = ws.row_dimensions[data_first]
     ws.row_dimensions[total_row].height = 18
 
     # ---------- 恢复冻结 + 筛选范围 ----------
     ws.freeze_panes = "A3"
-    ws.auto_filter.ref = f"B2:AC{total_row}"
+    ws.auto_filter.ref = f"A2:{get_column_letter(last_col)}{total_row}"
 
     wb.save(path)
-
-
-def _merge_consecutive_blanks(ws, col_idx, start, end):
-    """
-    空格向上合并：对每个「非空单元格」，将其下方连续的空格合并到该单元格。
-    例：序号9=1, 序号10~13=空 → 合并 H11:H15（H11 为锚点，H12~H15 并入）
-    """
-    r = start
-    while r <= end:
-        if not _cell_is_empty(ws.cell(row=r, column=col_idx).value):
-            # 从 r+1 开始找连续空格
-            merge_end = r
-            while merge_end + 1 <= end and _cell_is_empty(
-                ws.cell(row=merge_end + 1, column=col_idx).value
-            ):
-                merge_end += 1
-            if merge_end > r:
-                ws.merge_cells(
-                    start_row=r, start_column=col_idx,
-                    end_row=merge_end, end_column=col_idx,
-                )
-            r = merge_end + 1
-        else:
-            r += 1
 
 
 def transform(df):
