@@ -1,6 +1,6 @@
 """
 Excel 表格转化工具 - 桌面版（tkinter）
-双击运行：选择表一 Excel -> 自动转换 -> 保存为汇总表
+双击运行：选择数据表 Excel -> 自动转换 -> 保存汇总表
 """
 
 import tkinter as tk
@@ -22,7 +22,7 @@ def do_convert(input_path, output_path):
 
 def choose_file():
     path = filedialog.askopenfilename(
-        title="选择表一 Excel 文件",
+        title="选择数据表 Excel 文件",
         filetypes=[("Excel files", "*.xlsx")]
     )
     if not path:
@@ -44,7 +44,8 @@ def choose_file():
         count = do_convert(path, save_path)
         messagebox.showinfo(
             "转换完成",
-            f"共 {count} 行数据\n按序号升序排列\n\n已保存到：\n{save_path}"
+            f"共 {count} 行数据（27列）\n按序号升序排列\n\n"
+            f"⚠️ 运费列需手动填写（数据表中无此数据）\n\n已保存到：\n{save_path}"
         )
     except Exception as e:
         messagebox.showerror("转换失败", str(e) + "\n\n" + traceback.format_exc())
@@ -53,25 +54,25 @@ def choose_file():
 # ---------- UI ----------
 root = tk.Tk()
 root.title("Excel 表格转化工具")
-root.geometry("480x260")
+root.geometry("500x280")
 root.resizable(False, False)
 
 # 居中
 root.update_idletasks()
-x = (root.winfo_screenwidth() // 2) - (480 // 2)
-y = (root.winfo_screenheight() // 2) - (260 // 2)
-root.geometry(f"480x260+{x}+{y}")
+x = (root.winfo_screenwidth() // 2) - (500 // 2)
+y = (root.winfo_screenheight() // 2) - (280 // 2)
+root.geometry(f"500x280+{x}+{y}")
 
 tk.Label(
     root,
-    text="Excel 序号聚合转换工具",
+    text="Excel 汇总表生成工具",
     font=("Microsoft YaHei", 16, "bold")
-).pack(pady=20)
+).pack(pady=18)
 
 tk.Label(
     root,
-    text="表一（明细表）-> 汇总表",
-    font=("Microsoft YaHei", 10),
+    text="数据表 -> 汇总表（27列，含退税/保费自动计算）",
+    font=("Microsoft YaHei", 9),
     fg="gray"
 ).pack()
 
@@ -89,15 +90,13 @@ tk.Label(
     text="输出格式：第1行空，第2行标题，第3行起数据（按序号升序）",
     font=("Microsoft YaHei", 8),
     fg="gray"
-).pack(pady=8)
+).pack(pady=5)
 
 tk.Label(
     root,
-    text="20列：提单号/船次/序号/合同号/品名/件数/单位/体积/毛重/净重/数量/单价/总价...",
-    font=("Microsoft YaHei", 7),
-    fg="darkgray",
-    wraplength=440,
-    justify="center",
+    text="⚠️ 运费列需手动补充（物流报价），其余自动生成",
+    font=("Microsoft YaHei", 8),
+    fg="red"
 ).pack(pady=5)
 
 root.mainloop()
