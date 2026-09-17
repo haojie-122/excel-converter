@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import pandas as pd
-from converter import convert_table
+from converter import convert_table, to_excel_with_layout
 import os
 
 
@@ -30,10 +30,10 @@ def choose_file():
             title="保存汇总表"
         )
         if save_path:
-            result.to_excel(save_path, index=False)
+            to_excel_with_layout(result, save_path)
             messagebox.showinfo(
                 "完成",
-                f"转换成功！\n\n共 {len(result)} 行\n\n已保存到：\n{save_path}"
+                f"转换成功！\n\n共 {len(result)} 行数据\n按序号升序排列\n第1行空行，第2行标题\n\n已保存到：\n{save_path}"
             )
     except Exception as e:
         messagebox.showerror("出错", str(e))
@@ -67,7 +67,7 @@ tk.Button(
 
 tk.Label(
     root,
-    text="输出文件：原文件名_汇总表.xlsx",
+    text="输出格式：第1行空，第2行标题，第3行起数据（按序号升序）",
     font=("Microsoft YaHei", 9),
     fg="gray"
 ).pack(pady=15)
