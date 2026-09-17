@@ -1,154 +1,149 @@
 import pandas as pd
+from collections import OrderedDict
+
+NUMERIC_HINTS = [
+    "体积", "毛重", "净重", "数量", "件", "单价", "总价", "价（美金）",
+    "美金", "换汇", "成本", "运费", "保费", "序号"
+]
+
+MONEY_COLS = ["单价（美金）", "总 价（美金）", "总价（美金）", "换汇成本", "运费", "保费"]
+QTY_COLS = ["体积", "总毛重", "总净重", "总数量", "打包后件"]
+INT_HINTS = ["序号", "打包后件", "数量"]
 
 
-def safe_float(x, default=0.0):
+def clean_col(c):
+    if pd.isna(c):
+        return ""
+    return str(c).replace("\n", "").replace("\r", "").replace("\t", "").strip()
+
+
+def safe_float(x, default=None):
     if x is None:
         return default
     if isinstance(x, float) and pd.isna(x):
         return default
-    if isinstance(x, str):
-        s = x.strip()
-        if s in ('', '-', '—', '–', 'null', 'None', 'NA', 'N/A', '无', '空'):
-            return default
+    s = str(x).replace(",", "").replace("，", "").strip()
+    if s in ("", "-", "—", "–", "null", "None", "NA", "N/A", "无", "空"):
+        return default
     try:
-        return float(x)
-    except (ValueError, TypeError):
+        return float(s)
+    except Exception:
         return default
 
 
-def safe_int(x, default=0):
+def safe_int(x, default=None):
     v = safe_float(x, default)
     if v is None:
         return default
+    if float(v) == int(v):
+        return int(v)
     return int(v)
 
 
-def find_seq_col(columns):
-    for col in columns:
-        if "序号" in str(col):
-            return col
-    return columns[0]
+def looks_numeric(col):
+    return any(k in col for k in NUMERIC_HINTS)
 
 
-def convert_table(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    seq_col = find_seq_col(df.columns)
-    df = df.rename(columns={seq_col: "序号"})
-    df = df[df["序号"].notna()]
+def first_non_empty(series):
+    for x in series:
+        if x is None:
+            continue
+        if isinstance(x, float) and pd.isna(x):
+            continue
+        s = str(x).strip()
+        if s in ("", "-", "—", "–"):
+            continue
+        return x
+    return ""
 
-    # 数值列列表
-    num_cols = [
-        "体积", "总毛重", "总净重", "总数量",
-        "单价（美金）", "总 价（美金）", "换汇成本",
-        "运费", "保费", "打包后件数",
-    ]
 
-    # 自动识别更多数值列（含"金额""件数""数量"等关键词）
-    for col in df.columns:
-        for kw in ["金额", "件数", "数量", "重量", "体积", "总价", "单价"]:
-            if kw in str(col) and col not in num_cols and col != "序号":
-                num_cols.append(col)
-                break
+def normalize_columns(df):
+    # 假设第2行是标题，第1行空；调用前可用 header=1
+    df.columns = [clean_col(c) for c in df.columns]
+    # 去掉完全空列名
+    df = df.loc[:, df.columns != ""]
+    return df
 
-    # 所有数值列先做安全转换
-    for c in num_cols:
-        if c in df.columns:
-            df[c] = df[c].apply(lambda x: safe_float(x, 0.0))
 
-    # 序号列也做安全转换
-    df["序号"] = df["序号"].apply(lambda x: safe_int(x, 0))
+def convert_table(df):
+    df = normalize_columns(df)
 
-    # 去掉序号为0的行
-    df = df[df["序号"] > 0]
+    # 调试：可以在桌面弹窗/命令行看到实际列名
+    print("实际列名:", list(df.columns))
 
-    # 数值列：求和
-    sum_cols = [c for c in num_cols if c in df.columns]
+    # 序号处理
+    if "序号" not in df.columns:
+        raise ValueError(f"未找到“序号”列。实际列名：{list(df.columns)}")
 
-    # 非数值列：取每组第一个非空值
-    first_cols = [c for c in df.columns if c not in sum_cols + ["序号"]]
+    df["序号_数值"] = df["序号"].apply(lambda x: safe_int(x, default=None))
+    df = df.dropna(subset=["序号_数值"]).copy()
+    df["序号_数值"] = df["序号_数值"].astype(int)
 
-    agg = {}
-    for c in sum_cols:
-        agg[c] = "sum"
-    for c in first_cols:
-        agg[c] = "first"
+    # 数字列安全转换
+    for c in df.columns:
+        if looks_numeric(c) and c != "序号":
+            df[c + "_num"] = df[c].apply(lambda x: safe_float(x, 0))
 
-    result = df.groupby("序号", as_index=False).agg(agg)
+    grouped = df.groupby("序号_数值", sort=True)
 
-    # 按指定列顺序输出（20列）
-    output_columns = [
-        "提单号",
-        "船次",
-        "序号",
-        "外贸合同号",
-        "内贸合同号",
-        "品名",
-        "英文品名",
-        "打包后件数",
-        "单位种类",
-        "体积",
-        "总毛重",
-        "总净重",
-        "总数量",
-        "单位",
-        "法定单位",
-        "单价（美金）",
-        "总 价（美金）",
-        "换汇成本",
-        "运费",
-        "保费",
-    ]
+    out_rows = []
+    for seq, g in grouped:
+        row = OrderedDict()
 
-    for col in output_columns:
-        if col not in result.columns:
-            result[col] = ""
+        # 基础/文本字段优先保留
+        text_pref_cols = ["提单号", "船次", "序号", "外贸合同", "内贸合同",
+                          "品名", "英文品名", "单位", "种类", "法定单位",
+                          "打包后件"]
+        for c in text_pref_cols:
+            if c in df.columns:
+                row[c] = first_non_empty(g[c])
+        if not row.get("序号"):
+            row["序号"] = seq
 
-    result = result[output_columns]
+        # 其他非数字列也保留首值
+        for c in df.columns:
+            if c in row:
+                continue
+            if c.endswith("_num"):
+                continue
+            if looks_numeric(c):
+                continue
+            if c == "序号_数值":
+                continue
+            row[c] = first_non_empty(g[c])
 
-    # 计算单价（总价÷数量）
-    result["单价（美金）"] = result.apply(
-        lambda row: round(safe_float(row["总 价（美金）"], 0) / safe_float(row["总数量"], 1), 4)
-        if safe_float(row["总数量"], 0) > 0
-        else 0.0,
-        axis=1,
-    )
+        # 数字列：数量/重量/体积/件数求和；金额类求和；其他可取首值
+        for c in df.columns:
+            if not looks_numeric(c) or c == "序号":
+                continue
+            num_col = c + "_num"
+            if num_col in df.columns:
+                v = g[num_col].sum()
+            else:
+                v = safe_float(first_non_empty(g[c]), 0)
 
-    # 填充船次
-    result["船次"] = "989船"
+            if any(k in c for k in ["单价", "换汇", "成本", "运费", "保费", "总价", "价（美金）"]):
+                v = safe_float(first_non_empty(g[c]), 0)
+                if v is None:
+                    v = 0
 
-    # 按序号升序
-    result = result.sort_values("序号").reset_index(drop=True)
+            if any(k in c for k in INT_HINTS) and c not in MONEY_COLS:
+                if float(v) == int(v):
+                    row[c] = int(v) if v != 0 else ""
+                else:
+                    row[c] = v
+            else:
+                row[c] = v if v != 0 else ""
 
+        out_rows.append(row)
+
+    result = pd.DataFrame(out_rows)
     return result
 
 
-def to_excel_with_layout(result_df, path):
-    """
-    第1行空，第2行标题，第3行起数据，按序号升序
-    """
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        result_df.to_excel(
-            writer,
-            index=False,
-            header=False,
-            startrow=2,
-            sheet_name="汇总表",
-        )
-        ws = writer.sheets["汇总表"]
-
-        # 第2行写标题
-        for col_idx, name in enumerate(result_df.columns, start=1):
-            ws.cell(row=2, column=col_idx, value=name)
-
-        # 第1行空（不写内容）
-
-        # 自动调整列宽
-        for col_idx, name in enumerate(result_df.columns, start=1):
-            max_len = len(str(name))
-            for row in range(3, min(3 + len(result_df), 200)):
-                val = ws.cell(row=row, column=col_idx).value
-                if val is not None:
-                    max_len = max(max_len, len(str(val)[:20]))
-            ws.column_dimensions[
-                ws.cell(row=2, column=col_idx).column_letter
-            ].width = min(max_len + 4, 30)
+def to_excel_with_layout(df, save_path):
+    with pd.ExcelWriter(save_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, startrow=1)
+        ws = writer.sheets["Sheet1"]
+        ws.row_dimensions[1].height = 18
+    return save_path
