@@ -14,7 +14,7 @@ import traceback
 def do_convert(input_path, output_path):
     xls = pd.ExcelFile(input_path)
     sheet = xls.sheet_names[0]
-    df = pd.read_excel(xls, sheet_name=sheet, header=1)  # 第1行空，第2行标题
+    df = pd.read_excel(xls, sheet_name=sheet, header=1)
     result = convert_table(df)
     to_excel_with_layout(result, output_path)
     return len(result)
@@ -44,10 +44,14 @@ def choose_file():
         count = do_convert(path, save_path)
         messagebox.showinfo(
             "转换完成",
-            f"共 {count} 行数据（27列）\n按序号升序排列\n\n"
-            f"⚠️ 运费列需手动填写（数据表中无此数据）\n\n已保存到：\n{save_path}"
+            f"共 {count} 行数据（27列）\n\n"
+            f"✅ 空单元格已合并\n"
+            f"✅ 全部居中对齐\n"
+            f"✅ 运费公式已写入\n\n"
+            f"已保存到：\n{save_path}"
         )
     except Exception as e:
+        messageback = traceback.format_exc()
         messagebox.showerror("转换失败", str(e) + "\n\n" + traceback.format_exc())
 
 
@@ -57,7 +61,6 @@ root.title("Excel 表格转化工具")
 root.geometry("500x280")
 root.resizable(False, False)
 
-# 居中
 root.update_idletasks()
 x = (root.winfo_screenwidth() // 2) - (500 // 2)
 y = (root.winfo_screenheight() // 2) - (280 // 2)
@@ -71,7 +74,7 @@ tk.Label(
 
 tk.Label(
     root,
-    text="数据表 -> 汇总表（27列，含退税/保费自动计算）",
+    text="数据表 -> 汇总表（27列，合并+居中+运费公式）",
     font=("Microsoft YaHei", 9),
     fg="gray"
 ).pack()
@@ -87,16 +90,16 @@ tk.Button(
 
 tk.Label(
     root,
-    text="输出格式：第1行空，第2行标题，第3行起数据（按序号升序）",
+    text="输出格式：第1行空 | 第2行标题 | 第3行起数据（按序号升序）",
     font=("Microsoft YaHei", 8),
     fg="gray"
 ).pack(pady=5)
 
 tk.Label(
     root,
-    text="⚠️ 运费列需手动补充（物流报价），其余自动生成",
+    text="运费公式：=MAX(ROUND(SUM(Jn),2),SUM(Kn)/1000)*15",
     font=("Microsoft YaHei", 8),
-    fg="red"
+    fg="blue"
 ).pack(pady=5)
 
 root.mainloop()
